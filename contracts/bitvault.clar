@@ -96,3 +96,114 @@
     last-claim-block: uint,
   }
 )
+
+;; UTILITY FUNCTIONS & INPUT VALIDATION
+
+(define-private (validate-asset-uri (uri (string-ascii 256)))
+  (let ((uri-length (len uri)))
+    (and
+      (> uri-length u0)
+      (<= uri-length u256)
+    )
+  )
+)
+
+(define-private (validate-transfer-recipient (recipient principal))
+  (not (is-eq recipient (as-contract tx-sender)))
+)
+
+(define-private (safe-arithmetic-addition
+    (operand-a uint)
+    (operand-b uint)
+  )
+  (let ((result-sum (+ operand-a operand-b)))
+    (asserts! (>= result-sum operand-a) ERR_OVERFLOW)
+    (ok result-sum)
+  )
+)
+
+;; ASSET TOKENIZATION & TRANSFER OPERATIONS
+
+(define-public (mint-asset-token
+    (asset-uri (string-ascii 256))
+    (collateral-value uint)
+  )
+  (let (
+      (new-token-id (+ (var-get total-token-supply) u1))
+      (required-collateral (/ (* (var-get minimum-collateral-ratio) collateral-value) u100))
+    )
+    (asserts! (validate-asset-uri asset-uri) ERR_INVALID_URI)
+    (asserts! (>= (stx-get-balance tx-sender) required-collateral)
+      ERR_INSUFFICIENT_COLLATERAL
+    )
+    (try! (stx-transfer? required-collateral tx-sender (as-contract tx-sender)))
+    (map-set vault-tokens { token-id: new-token-id } {
+      owner: tx-sender,
+      asset-uri: asset-uri,
+      collateral-amount: collateral-value,
+      is-actively-staked: false,
+      staking-start-block: u0,
+      fractional-total-shares: u0,
+    })
+    (var-set total-token-supply new-token-id)
+    (ok new-token-id)
+  )
+)
+
+(define-public (transfer-asset-token
+    (token-id uint)
+    (new-owner principal)
+  )
+  (let ((token-data (unwrap! (get-vault-token-info token-id) ERR_INVALID_TOKEN)))
+    (asserts! (validate-transfer-recipient new-owner) ERR_INVALID_RECIPIENT)
+    (asserts! (is-eq tx-sender (get owner token-data)) ERR_NOT_TOKEN_OWNER)
+    (asserts! (not (get is-actively-staked token-data)) ERR_ALREADY_STAKED)
+    (map-set vault-tokens { token-id: token-id }
+      (merge token-data { owner: new-owner })
+    )
+    (ok true)
+  )
+)
+
+;; DECENTRALIZED MARKETPLACE INFRASTRUCTURE
+
+(define-public (create-marketplace-listing
+    (token-id uint)
+    (asking-price uint)
+  )
+  (let ((token-data (unwrap! (get-vault-token-info token-id) ERR_INVALID_TOKEN)))
+    (asserts! (> asking-price u0) ERR_INVALID_PRICE)
+    (asserts! (is-eq tx-sender (get owner token-data)) ERR_NOT_TOKEN_OWNER)
+    (asserts! (not (get is-actively-staked token-data)) ERR_ALREADY_STAKED)
+    (map-set marketplace-listings { token-id: token-id } {
+      listing-price: asking-price,
+      seller-address: tx-sender,
+      is-active: true,
+    })
+    (ok true)
+  )
+)
+
+(define-public (execute-token-purchase (token-id uint))
+  (let (
+      (listing-data (unwrap! (get-marketplace-listing token-id) ERR_LISTING_NOT_FOUND))
+      (purchase-price (get listing-price listing-data))
+      (seller-address (get seller-address listing-data))
+      (protocol-fee (/ (* purchase-price (var-get protocol-fee-rate)) u10000))
+      (seller-proceeds (- purchase-price protocol-fee))
+    )
+    (asserts! (get is-active listing-data) ERR_LISTING_NOT_FOUND)
+    ;; Execute payment transfers
+    (try! (stx-transfer? seller-proceeds tx-sender seller-address))
+    (try! (stx-transfer? protocol-fee tx-sender (as-contract tx-sender)))
+    ;; Transfer token ownership
+    (try! (transfer-asset-token token-id tx-sender))
+    ;; Deactivate marketplace listing
+    (map-set marketplace-listings { token-id: token-id } {
+      listing-price: u0,
+      seller-address: seller-address,
+      is-active: false,
+    })
+    (ok true)
+  )
+)
