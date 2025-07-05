@@ -207,3 +207,105 @@
     (ok true)
   )
 )
+
+;; ADVANCED FRACTIONAL OWNERSHIP SYSTEM
+
+(define-public (transfer-fractional-shares
+    (token-id uint)
+    (share-recipient principal)
+    (share-quantity uint)
+  )
+  (let (
+      (sender-shares (unwrap! (get-fractional-ownership-data token-id tx-sender)
+        ERR_INSUFFICIENT_BALANCE
+      ))
+      (current-recipient-shares (default-to { ownership-shares: u0 }
+        (get-fractional-ownership-data token-id share-recipient)
+      ))
+      (updated-recipient-shares (unwrap!
+        (safe-arithmetic-addition (get ownership-shares current-recipient-shares)
+          share-quantity
+        )
+        ERR_OVERFLOW
+      ))
+    )
+    (asserts! (validate-transfer-recipient share-recipient) ERR_INVALID_RECIPIENT)
+    (asserts! (>= (get ownership-shares sender-shares) share-quantity)
+      ERR_INSUFFICIENT_BALANCE
+    )
+    ;; Update sender's share balance
+    (map-set fractional-token-ownership {
+      token-id: token-id,
+      shareholder: tx-sender,
+    } { ownership-shares: (- (get ownership-shares sender-shares) share-quantity) }
+    )
+    ;; Update recipient's share balance
+    (map-set fractional-token-ownership {
+      token-id: token-id,
+      shareholder: share-recipient,
+    } { ownership-shares: updated-recipient-shares }
+    )
+    (ok true)
+  )
+)
+
+;; INTELLIGENT STAKING & YIELD OPTIMIZATION
+
+(define-public (initiate-token-staking (token-id uint))
+  (let ((token-data (unwrap! (get-vault-token-info token-id) ERR_INVALID_TOKEN)))
+    (asserts! (is-eq tx-sender (get owner token-data)) ERR_NOT_TOKEN_OWNER)
+    (asserts! (not (get is-actively-staked token-data)) ERR_ALREADY_STAKED)
+    (map-set vault-tokens { token-id: token-id }
+      (merge token-data {
+        is-actively-staked: true,
+        staking-start-block: stacks-block-height,
+      })
+    )
+    (map-set staking-yield-tracking { token-id: token-id } {
+      accumulated-rewards: u0,
+      last-claim-block: stacks-block-height,
+    })
+    (var-set total-staked-assets (+ (var-get total-staked-assets) u1))
+    (ok true)
+  )
+)
+
+(define-public (terminate-token-staking (token-id uint))
+  (let (
+      (token-data (unwrap! (get-vault-token-info token-id) ERR_INVALID_TOKEN))
+      (rewards-data (unwrap! (get-staking-rewards-info token-id) ERR_NOT_STAKED))
+    )
+    (asserts! (is-eq tx-sender (get owner token-data)) ERR_NOT_TOKEN_OWNER)
+    (asserts! (get is-actively-staked token-data) ERR_NOT_STAKED)
+    ;; Process final reward distribution
+    (try! (distribute-staking-rewards token-id))
+    (map-set vault-tokens { token-id: token-id }
+      (merge token-data {
+        is-actively-staked: false,
+        staking-start-block: u0,
+      })
+    )
+    (var-set total-staked-assets (- (var-get total-staked-assets) u1))
+    (ok true)
+  )
+)
+
+;; COMPREHENSIVE DATA QUERY INTERFACE
+
+(define-read-only (get-vault-token-info (token-id uint))
+  (map-get? vault-tokens { token-id: token-id })
+)
+
+(define-read-only (get-marketplace-listing (token-id uint))
+  (map-get? marketplace-listings { token-id: token-id })
+)
+
+(define-read-only (get-fractional-ownership-data
+    (token-id uint)
+    (shareholder principal)
+  )
+  (map-get? fractional-token-ownership {
+    token-id: token-id,
+    shareholder: shareholder,
+  })
+)
